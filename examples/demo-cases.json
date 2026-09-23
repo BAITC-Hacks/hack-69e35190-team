@@ -1,0 +1,32 @@
+[
+  {
+    "id": "dense_autumn_oct10",
+    "request": {"city": "Алматы", "event_date": "2026-10-10", "event_type": "корпоратив", "category": "Ведущий", "budget_kzt": 1500000},
+    "expected": {"status": "matched", "candidate_count": 10, "eligible_count": 5, "card_ids": ["HK-88430", "HK-29829", "HK-27222"], "exclusion_counts": {"busy": 4, "budget": 1, "format": 1, "language": 0, "duration": 0}}
+  },
+  {
+    "id": "dense_autumn_oct11",
+    "request": {"city": "Алматы", "event_date": "2026-10-11", "event_type": "корпоратив", "category": "Ведущий", "budget_kzt": 1500000},
+    "expected": {"status": "matched", "candidate_count": 10, "eligible_count": 4, "card_ids": ["HK-44923", "HK-27222", "HK-44733"], "exclusion_counts": {"busy": 4, "budget": 1, "format": 1, "language": 0, "duration": 0}}
+  },
+  {
+    "id": "rare_florist",
+    "request": {"city": "Алматы", "event_date": "2026-10-10", "event_type": "свадьба", "category": "Флорист", "budget_kzt": 500000},
+    "expected": {"status": "matched", "candidate_count": 2, "eligible_count": 1, "card_ids": ["HK-39372"], "exclusion_counts": {"busy": 1, "budget": 0, "format": 0, "language": 0, "duration": 0}}
+  },
+  {
+    "id": "category_absent_in_city",
+    "request": {"city": "Зарубежье", "event_date": "2026-10-10", "event_type": "свадьба", "category": "Флорист", "budget_kzt": 500000},
+    "expected": {"status": "category_not_in_city", "candidate_count": 0, "eligible_count": 0, "card_ids": [], "exclusion_counts": {"busy": 0, "budget": 0, "format": 0, "language": 0, "duration": 0}}
+  },
+  {
+    "id": "candidates_fail_budget",
+    "request": {"city": "Алматы", "event_date": "2026-10-10", "event_type": "корпоратив", "category": "Ведущий", "budget_kzt": 1},
+    "expected": {"status": "no_matches", "candidate_count": 10, "eligible_count": 0, "card_ids": [], "exclusion_counts": {"busy": 4, "budget": 10, "format": 1, "language": 0, "duration": 0}}
+  },
+  {
+    "id": "venue_calendar_and_synthetic",
+    "request": {"city": "Алматы", "event_date": "2026-11-14", "event_type": "свадьба", "category": "Банкетный зал", "budget_kzt": 6000000},
+    "expected": {"status": "matched", "candidate_count": 7, "eligible_count": 2, "card_ids": ["HK-64395", "HK-90011"], "exclusion_counts": {"busy": 5, "budget": 0, "format": 1, "language": 0, "duration": 0}}
+  }
+]
