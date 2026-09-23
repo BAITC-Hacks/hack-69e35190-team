@@ -73,6 +73,15 @@ class AILayerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "занятого"):
             self.explainer.enrich_response(case["request"], original)
 
+    def test_semantic_similarity_cannot_promote_generic_praise(self):
+        explainer = AIExplainer(settings=Settings(model="fake", dimensions=2), embedder=FakeEmbeddings())
+        selector = explainer.selector
+        selector.vectors = [[0.0, 1.0] if "ответственная" in item.text else [1.0, 0.0]
+                            for item in selector.fragments]
+        fragment = selector.select(self.cases[0]["request"], "HK-29829")
+        self.assertIn("танцы", fragment.text)
+        self.assertNotIn("ответственная", fragment.text)
+
     def test_optional_fields_and_null_hours(self):
         case = self.cases[2]
         order = dict(case["request"], language="русский", duration_hours=6)

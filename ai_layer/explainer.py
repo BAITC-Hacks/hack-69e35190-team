@@ -29,7 +29,7 @@ def _verify_eligible(order, row):
                              ("event_formats", order["event_type"])):
         if not any(_same(requested, value) for value in row[field].split("|")):
             raise ValueError("Карточка не соответствует " + field)
-    if order["event_date"] in row["busy_dates"].split("|"):
+    if order["event_date"] in [value.strip() for value in row["busy_dates"].split("|")]:
         raise ValueError("Нельзя объяснять занятого подрядчика")
     if int(row["price_from_kzt"]) > int(order["budget_kzt"]):
         raise ValueError("Карточка превышает бюджет")

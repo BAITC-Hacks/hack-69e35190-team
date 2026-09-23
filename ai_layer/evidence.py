@@ -5,10 +5,11 @@ import math
 import os
 import re
 import tempfile
+from copy import copy
 from pathlib import Path
 
 from .config import DEFAULT_INDEX
-from .embeddings import EmbeddingError
+from .embeddings import EmbeddingError, OpenAIEmbeddings
 
 
 EVENT_PATTERNS = {
@@ -92,7 +93,9 @@ class EvidenceSelector:
                 data["model"] != self.model or data["dimensions"] != self.dimensions or
                 len(data["vectors"]) != len(self.fragments)):
                 return None
-            if any(len(vector) != self.dimensions for vector in data["vectors"]):
+            if any(len(vector) != self.dimensions or
+                   any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) for n in vector)
+                   for vector in data["vectors"]):
                 return None
             return data["vectors"]
         except (OSError, KeyError, TypeError, ValueError):
@@ -105,9 +108,13 @@ class EvidenceSelector:
         if batch_size <= 0:
             raise ValueError("batch_size должен быть положительным")
         vectors = []
+        embedder = self.embedder
+        if isinstance(embedder, OpenAIEmbeddings):
+            embedder = copy(embedder)
+            embedder.timeout = 15  # Индексация фоновая; пользовательские запросы сохраняют 3 с.
         for start in range(0, len(self.fragments), batch_size):
             batch = self.fragments[start:start + batch_size]
-            vectors.extend(self.embedder.embed([" ".join(item.text.split()) for item in batch]))
+            vectors.extend(embedder.embed([" ".join(item.text.split()) for item in batch]))
         if len(vectors) != len(self.fragments):
             raise EmbeddingError("Индекс эмбеддингов неполный")
         data = {"schema": 1, "csv_sha256": self.catalog.digest, "model": self.model,
@@ -133,10 +140,18 @@ class EvidenceSelector:
             return None
         lexical = {fragment.fragment_index: _lexical_score(fragment, order, profile["anon_name"])
                    for fragment in candidates}
+        # Семантическая близость общего комплимента не делает его объяснением.
+        # Сначала оставляем содержательные фрагменты, затем сравниваем их смысл.
+        best_quality = max(lexical.values())
+        if best_quality >= 3:
+            candidates = tuple(item for item in candidates
+                               if lexical[item.fragment_index] >= max(3, best_quality * 0.6))
         vectors = None
         if self.vectors is not None and self.embedder is not None:
             query = _search_text(order)
             if query not in self.query_cache:
+                if len(self.query_cache) >= 512:
+                    self.query_cache.clear()
                 try:
                     self.query_cache[query] = self.embedder.embed([query])[0]
                 except (EmbeddingError, IndexError):

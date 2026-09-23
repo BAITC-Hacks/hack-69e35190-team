@@ -52,6 +52,10 @@ def fragments_for(profile_id, description):
             text = description[part_start:part_end]
             if len(text) >= 22 and re.search(r"[А-Яа-яA-Za-z]", text):
                 result.append(Fragment(profile_id, len(result), part_start, part_end, text))
+    if not result and description.strip():
+        start = len(description) - len(description.lstrip())
+        end = len(description.rstrip())
+        result.append(Fragment(profile_id, 0, start, end, description[start:end]))
     return tuple(result)
 
 
@@ -64,6 +68,9 @@ class Catalog:
         self.fragments = {}
         with self.path.open(encoding="utf-8-sig", newline="") as source:
             for row in csv.DictReader(source):
+                row = {key: value.strip() for key, value in row.items()}
+                if row["max_hours"].lower() == "null":
+                    row["max_hours"] = ""
                 profile_id = row["id"].strip()
                 if not profile_id or profile_id in self.profiles:
                     raise ValueError("Пустой или повторяющийся id в CSV")

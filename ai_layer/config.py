@@ -33,6 +33,7 @@ class Settings:
     openai_api_key: str = ""
     model: str = "text-embedding-3-small"
     dimensions: int = 256
+    chat_model: str = "gpt-4.1-mini-2025-04-14"
 
     @classmethod
     def load(cls, env_file=ROOT / ".env"):
@@ -45,4 +46,5 @@ class Settings:
         dimensions = int(get("AI_EMBEDDING_DIMENSIONS", "256"))
         if not model or dimensions <= 0:
             raise ValueError("Неверная настройка модели эмбеддингов")
-        return cls(openai_api_key=get("OPENAI_API_KEY"), model=model, dimensions=dimensions)
+        return cls(openai_api_key=get("OPENAI_API_KEY"), model=model, dimensions=dimensions,
+                   chat_model=get("AI_CHAT_MODEL", "gpt-4.1-mini-2025-04-14"))
