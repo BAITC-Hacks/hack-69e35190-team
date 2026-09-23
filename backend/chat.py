@@ -30,6 +30,25 @@ ALIASES = {
 }
 AMOUNT = r"[+-]?\d+(?: \d{3})*(?:[.,]\d+)?"
 MONEY_UNIT = r"(?:млн|миллион(?:а|ов)?|тыс(?:яч(?:а|и|у)?)?\.?|[кk]|тенге|тг|₸)(?!\w)"
+HOURS = r"(?:час(?:а|ов)?|ч\.?)(?![^\W\d])"
+MINUTES = r"(?:минут(?:а|ы)?|мин\.?)(?!\w)"
+NUMBER = r"[+-]?\d+(?:[.,]\d+)?"
+CLOCK = (r"(?<!\w)в\s+\d{1,2}\s*" + HOURS +
+         r"(?:\s*(?:и\s*)?\d{1,2}\s*" + MINUTES + r")?|\b\d{1,2}:\d{2}\b")
+CLEAR_LANGUAGE = r"(?:язык|языке)\s*(?:не\s*важ[а-я]*|любой|без\s*разницы)"
+CLEAR_DURATION = (r"(?:длительность|продолжительность|часы)\s*"
+                  r"(?:не\s*важ[а-я]*|люб[а-я]*|без\s*(?:разницы|ограничений))"
+                  r"|без\s+ограничений\s+(?:по\s+)?(?:длительности|времени)")
+
+
+def affirmative_text(text):
+    """Отброшенное значение в «не X, а Y» не участвует в извлечении.
+
+    Верхние границы и отмена необязательных условий — не отрицание значения.
+    Другие отрицания ниже требуют уточнения, а не выбора отвергнутого варианта.
+    """
+    return re.sub(r"(?<!\w)не\s+(?!(?:важ[а-я]*|более|меньше|позже|раньше|дороже|выше)\b)"
+                  r"[^;!?\n]*?\s*,?\s+а\s+", "", normalize(text))
 
 
 def _budget_match(text, unit_required=False):
@@ -37,7 +56,9 @@ def _budget_match(text, unit_required=False):
     with_unit = re.search(r"(?<![\w:])(" + AMOUNT + r")\s*(" + MONEY_UNIT + r")", text)
     if with_unit or unit_required:
         return with_unit
-    return re.search(r"(?<!\w)(?:бюджет(?:ом)?|бюдж|до|за)\s*[:=]?\s*(" + AMOUNT +
+    limit = r"(?:не\s+(?:более|дороже|выше)|максимум|до|в\s+пределах)"
+    return re.search(r"(?<!\w)(?:бюджет(?:ом)?|бюдж|" + limit + r"|за)\s*[:=]?\s*"
+                     r"(?:" + limit + r"\s*)?(" + AMOUNT +
                      r")\s*(" + MONEY_UNIT + r")?", text)
 
 
@@ -57,38 +78,54 @@ def vocabulary(service):
 
 
 def local_updates(text, previous, vocab):
-    t = normalize(text)
+    t = affirmative_text(text)
     updates = {}
     for field, aliases in ALIASES.items():
         value = catalog_value(t, field, vocab[field], aliases)
         if value is not None:
             updates[field] = value
-    if re.search(r"(?:язык|языке)\s*(?:не\s*важ[а-я]*|любой|без\s*разницы)", t):
+    if re.search(CLEAR_LANGUAGE, t):
         updates["language"] = None
-    duration = re.search(r"(?<![\d:])(\d+(?:[.,]\d+)?)\s*(?:час(?:а|ов)?|ч)(?!\w)", t)
+    if re.search(CLEAR_DURATION, t):
+        updates["duration_hours"] = None
+    # «В 15 часов» — начало мероприятия, «на 3 часа» — длительность.
+    t = re.sub(CLOCK, " ", t)
+    duration = re.search(r"(?<![\d:])(" + NUMBER + r")\s*" + HOURS +
+                         r"(?:\s*(?:и\s*)?(\d+(?:[.,]\d+)?)\s*" + MINUTES + r")?", t)
     if duration:
-        updates["duration_hours"] = float(duration[1].replace(",", "."))
+        hours = Decimal(duration[1].replace(",", "."))
+        minutes = Decimal((duration[2] or "0").replace(",", "."))
+        updates["duration_hours"] = float(hours + minutes / 60)
         t = t[:duration.start()] + " " + t[duration.end():]
-    # Удаление времени не позволяет принять его за дату или бюджет.
-    t = re.sub(r"\b\d{1,2}:\d{2}\b", " ", t)
+    minutes = re.search(r"(?<![\d:])(" + NUMBER + r")\s*" + MINUTES, t)
+    if minutes:
+        if duration:
+            raise ValueError("Укажите одну длительность, например: «на 6 часов 30 минут»")
+        updates["duration_hours"] = float(Decimal(minutes[1].replace(",", ".")) / 60)
+        t = t[:minutes.start()] + " " + t[minutes.end():]
+    if re.search(r"(?<![\d:])" + NUMBER + r"\s*" + HOURS, t):
+        raise ValueError("Укажите одну длительность мероприятия")
     budget = _budget_match(t, unit_required=True)
     if budget:
         updates["budget_kzt"] = _budget_amount(budget)
         t = t[:budget.start()] + " " + t[budget.end():]
     year = int(vocab["calendar_start"][:4])
     iso = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", t)
-    numeric = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{4}))?\b", t)
+    numeric = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{4}|\d{2}))?\b(?![./\d])", t)
+    def explicit_year(value):
+        return int(value) + (2000 if len(value) == 2 else 0) if value else year
     if iso:
         updates["event_date"] = iso[0]
         t = t.replace(iso[0], " ", 1)
     elif numeric:
-        updates["event_date"] = "{:04d}-{:02d}-{:02d}".format(int(numeric[3] or year), int(numeric[2]), int(numeric[1]))
+        updates["event_date"] = "{:04d}-{:02d}-{:02d}".format(explicit_year(numeric[3]), int(numeric[2]), int(numeric[1]))
         t = t.replace(numeric[0], " ", 1)
     else:
-        for match in re.finditer(r"\b(\d{1,2})(?:-?(?:го|ое|е))?\s*([а-я]{3,})\.?(?:\s+(\d{4})(?!\d))?(?!\w)", t):
+        for match in re.finditer(r"\b(\d{1,2})(?:-?(?:го|ое|е))?\s*([а-я]{3,})\.?"
+                                 r"(?:\s+(\d{4}|\d{2})(?!\d)(?:\s*г(?:ода|од|\.)?)?)?(?!\w)", t):
             month = month_number(match[2])
             if month is not None:
-                updates["event_date"] = "{:04d}-{:02d}-{:02d}".format(int(match[3] or year), month, int(match[1]))
+                updates["event_date"] = "{:04d}-{:02d}-{:02d}".format(explicit_year(match[3]), month, int(match[1]))
                 t = t.replace(match[0], " ", 1)
                 break
     if budget is None:
@@ -101,6 +138,54 @@ def local_updates(text, previous, vocab):
         if budget:
             updates["budget_kzt"] = _budget_amount(budget)
     return updates
+
+
+def unresolved_constraints(text, updates, vocab):
+    """Не запускаем подбор со старым значением явно названного нового условия."""
+    t = affirmative_text(text)
+    unresolved = set()
+    mentions = {
+        "budget_kzt": r"(?<!\w)бюдж[а-я]*|(?<![\w:])" + AMOUNT + r"\s*" + MONEY_UNIT,
+        "duration_hours": (r"(?:длительност|продолжительност)[а-я]*|(?<!\w)(?:" + HOURS + r"|" + MINUTES +
+                           r")|(?<![\d:])" + NUMBER + r"\s*(?:" + HOURS + r"|" + MINUTES + r")"),
+        "language": r"(?<!\w)язык[а-я]*",
+        "city": r"(?<!\w)город[а-я]*",
+        "category": r"(?<!\w)категори[а-я]*",
+        "event_date": r"(?<!\w)дат(?:а|у|е|ы|ой)(?!\w)|\b\d{1,2}[./]\d{1,2}",
+    }
+    without_clock = re.sub(CLOCK, " ", t)
+    # Десятичная сумма/длительность — не новая дата. Используем тот же порядок
+    # маскирования, что и при извлечении, иначе «6.5 часов» теряет прежнюю дату.
+    date_text = re.sub(r"(?<![\w:])" + AMOUNT + r"\s*" + MONEY_UNIT, " ", without_clock)
+    date_text = re.sub(r"(?<![\d:])" + NUMBER + r"\s*(?:" + HOURS + r"|" + MINUTES + r")", " ", date_text)
+    for field, pattern in mentions.items():
+        if re.search(pattern, date_text if field == "event_date" else without_clock) and field not in updates:
+            unresolved.add(field)
+    # Именованные языки вне словаря нельзя превращать в «язык не важен».
+    # Словоформы импортированных языков распознаются через catalog_value.
+    for match in re.finditer(r"(?<!\w)(?:на\s+|по[- ])([а-я]+(?:ском|цком|ски|цки)|хинди|иврите|урду|фарси)(?!\w)", t):
+        if catalog_value(match[1], "language", vocab["language"], ALIASES["language"]) is None:
+            unresolved.add("language")
+    for match in re.finditer(r"(?<!\w)язык[а-я]*\s*[:=—-]?\s+([а-я]+(?:\s+(?:и|или)\s+[а-я]+)*)", t):
+        if re.match(CLEAR_LANGUAGE, t[match.start():]):
+            continue
+        tokens = re.findall(r"[а-я]+", match[1])
+        # Проверяем каждое явно перечисленное название, а не только первое.
+        named = [token for token in tokens if token.endswith(("ий", "ом")) or
+                 token in ("хинди", "иврит", "урду", "фарси")]
+        values = {catalog_value(token, "language", vocab["language"], ALIASES["language"]) for token in named}
+        if None in values or len(values) > 1:
+            unresolved.add("language")
+    # «Не фотограф» не означает «Фотограф». Без явной замены спросим пользователя.
+    negatives = re.finditer(r"(?<!\w)не\s+(?!(?:важ[а-я]*|более|меньше|позже|раньше|дороже|выше)\b)"
+                           r"([^,;.!?]+)", t)
+    for negative in negatives:
+        for field, aliases in ALIASES.items():
+            if catalog_value(negative[1], field, vocab[field], aliases) is not None:
+                unresolved.add(field)
+        if re.search(r"\d", negative[1]):
+            unresolved.update(key for key in updates if key in ("event_date", "budget_kzt", "duration_hours"))
+    return unresolved
 
 
 def validate_partial(service, slots):
@@ -125,12 +210,19 @@ class ChatService:
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 4000:
             raise ValueError("Сообщение должно содержать от 1 до 4000 символов")
         previous = validate_partial(service, data.get("slots", {}))
+        raw_pending = data.get("pending_fields", [])
+        if (not isinstance(raw_pending, list) or
+                any(not isinstance(field, str) or field not in FIELDS for field in raw_pending)):
+            raise ValueError("pending_fields: требуется список известных полей заказа")
+        pending = set(raw_pending)
         vocab = vocabulary(service)
         updates = local_updates(text, previous, vocab)
+        newly_unresolved = unresolved_constraints(text, updates, vocab)
+        unresolved = (pending - updates.keys()) | newly_unresolved
         warnings, mode = [], "local"
         merged = previous | updates
         understood = bool(updates)
-        if self.extractor and (not updates or any(not merged.get(key) for key in REQUIRED)):
+        if self.extractor and (unresolved or not updates or any(not merged.get(key) for key in REQUIRED)):
             cache_key = json.dumps([service.explainer.catalog.digest, vocab, text, previous], ensure_ascii=False, sort_keys=True)
             try:
                 with self.lock:
@@ -143,21 +235,39 @@ class ChatService:
                         if len(self.cache) > 256:
                             self.cache.popitem(last=False)
                 merged = previous | extra | updates  # Явные локальные значения приоритетнее LLM.
+                # Перенесённое спорное поле нельзя снять ответом модели на сообщение
+                # о другом условии: нужен локальный разбор либо явное упоминание поля.
+                confirmed = updates.keys() | (extra.keys() & newly_unresolved)
+                unresolved = (pending - confirmed) | unresolved_constraints(text, extra | updates, vocab)
                 understood = understood or bool(extra)
                 mode = "openai"
             except Exception:
                 warnings.append("AI-разбор недоступен: использованы локальные правила; проверьте распознанные поля")
+        if re.search(CLOCK, normalize(text)):
+            warnings.append("Календарь учитывает весь день; время начала отдельно не проверяется")
+        if unresolved:
+            # Не сохраняем прежнее значение спорного условия как будто оно подтверждено.
+            # Остальные новые поля сохраняются, поэтому их не придётся вводить повторно.
+            slots = validate_partial(service, {key: value for key, value in merged.items() if key not in unresolved})
+            labels = {"city": "город", "category": "категорию", "event_type": "формат мероприятия",
+                      "event_date": "дату", "budget_kzt": "бюджет в тенге",
+                      "language": "язык из каталога или «язык не важен»",
+                      "duration_hours": "длительность, например «6 часов 30 минут», или «длительность не важна»"}
+            fields = sorted(unresolved)
+            return {"slots": slots, "missing_field": "clarification",
+                    "prompt": "Не удалось однозначно распознать условие. Уточните " +
+                              "; ".join(labels[field] for field in fields) + ".",
+                    "choices": vocab.get(fields[0], []), "parser": mode, "warnings": warnings,
+                    "pending_fields": fields, "result": None}
         slots = validate_partial(service, merged)
         missing = next((key for key in REQUIRED if not slots.get(key)), None)
         prompts = {"city": "В каком городе ищем подрядчика?", "category": "Кого ищем — какая категория подрядчика?",
                    "event_type": "Какой тип мероприятия?", "event_date": "Укажите дату с {} по {}".format(service.calendar_start, service.calendar_end),
                    "budget_kzt": "Какой бюджет в тенге?"}
-        if re.search(r"\b\d{1,2}:\d{2}\b", text):
-            warnings.append("Календарь учитывает весь день; время начала отдельно не проверяется")
         if not understood and missing is None:
             return {"slots": slots, "missing_field": "clarification",
                     "prompt": "Не удалось распознать изменение. Укажите конкретно, например: «бюджет 500000» или «11 октября»",
-                    "choices": [], "parser": mode, "warnings": warnings, "result": None}
+                    "choices": [], "parser": mode, "warnings": warnings, "pending_fields": [], "result": None}
         result = None
         if missing is None:
             order = {key: value for key, value in slots.items() if value is not None}
@@ -169,4 +279,4 @@ class ChatService:
                     result["date_comparison"] = comparison
         return {"slots": slots, "missing_field": missing, "prompt": prompts.get(missing),
                 "choices": vocab.get(missing, []), "parser": mode, "warnings": warnings,
-                "result": result}
+                "pending_fields": [], "result": result}

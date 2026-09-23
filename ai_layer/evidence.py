@@ -8,6 +8,7 @@ import tempfile
 from copy import copy
 from pathlib import Path
 
+from .catalog import FRAGMENTATION_VERSION
 from .config import DEFAULT_INDEX
 from .embeddings import EmbeddingError, OpenAIEmbeddings
 
@@ -25,13 +26,27 @@ CATEGORY_PATTERNS = {
     "Флорист": (r"флорист", r"цвет", r"композиц"),
     "Банкетный зал": (r"зал", r"террас", r"гост", r"банкет"),
     "Фотограф": (r"фото", r"съ[её]м", r"снима", r"кадр", r"репортаж", r"концерт"),
+    "Лайв-бэнд": (r"состав", r"вокал", r"репертуар", r"музык", r"инструмент"),
 }
 DISTINCTIVE_PATTERNS = (
     r"танц", r"развлеч", r"\bреч", r"юмор", r"импровиз", r"традиц",
     r"панорам", r"гор", r"кейтер", r"парков", r"авторск", r"сценар",
     r"делов", r"форум", r"двуязыч", r"букет", r"сезонн", r"интерактив",
     r"итальянск", r"казахск", r"конкурс", r"вместим",
+    r"вокал", r"струнн", r"квартет", r"саксофон", r"тромбон", r"гитар",
+    r"барабан", r"перкус", r"брасс", r"клавиш",
+    r"джигит", r"хореограф", r"взаимодействи\w* с публикой", r"90-х", r"2000-х",
 )
+GENERIC_PRAISE = re.compile(
+    r"отличн(?:ый|ая) выбор|идеально впишется|любой формат мероприятия"
+    r"|профессионал\w* сво(?:его|ей) дела|парад незабываемых впечатлений"
+    r"|особое и незабываемое звучание|любовь к музыке переда[её]тся"
+    r"|свяжитесь с нами|снискавш\w* народную любовь|мы действительно сверкаем"
+    r"|это не просто концерт|событие по-настоящему запоминающимся"
+    r"|^(?:мы|я)\s*[—–-]\s*[a-z][a-z\s&'-]+[.!]?$"
+)
+INDEX_SCHEMA_VERSION = 2
+MAX_EVIDENCE_CHARS = 600
 
 
 def _lexical_score(fragment, order, anon_name):
@@ -49,8 +64,6 @@ def _lexical_score(fragment, order, anon_name):
     score += min(len(re.findall(r"[А-Яа-яA-Za-z]{4,}", text)), 16) * 0.06
     if anon_name and anon_name.casefold() in text:
         score -= 12
-    if re.search(r"отличн(ый|ая) выбор|профессионал сво(его|ей) дела", text):
-        score -= 6
     return score
 
 
@@ -89,7 +102,9 @@ class EvidenceSelector:
             return None
         try:
             data = json.loads(self.index_path.read_text(encoding="utf-8"))
-            if (data["schema"] != 1 or data["csv_sha256"] != self.catalog.digest or
+            if (data["schema"] != INDEX_SCHEMA_VERSION or
+                data["fragmentation_version"] != FRAGMENTATION_VERSION or
+                data["csv_sha256"] != self.catalog.digest or
                 data["model"] != self.model or data["dimensions"] != self.dimensions or
                 len(data["vectors"]) != len(self.fragments)):
                 return None
@@ -117,7 +132,8 @@ class EvidenceSelector:
             vectors.extend(embedder.embed([" ".join(item.text.split()) for item in batch]))
         if len(vectors) != len(self.fragments):
             raise EmbeddingError("Индекс эмбеддингов неполный")
-        data = {"schema": 1, "csv_sha256": self.catalog.digest, "model": self.model,
+        data = {"schema": INDEX_SCHEMA_VERSION, "fragmentation_version": FRAGMENTATION_VERSION,
+                "csv_sha256": self.catalog.digest, "model": self.model,
                 "dimensions": self.dimensions, "vectors": vectors}
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
@@ -135,7 +151,11 @@ class EvidenceSelector:
 
     def select(self, order, profile_id):
         profile = self.catalog.profiles[profile_id]
-        candidates = self.catalog.fragments[profile_id]
+        # Даже очень близкий embedding рекламной фразы не является фактом.
+        # Если иных сведений нет, возвращаем None, а не выдумываем особенность.
+        candidates = tuple(fragment for fragment in self.catalog.fragments[profile_id]
+                           if len(fragment.text) <= MAX_EVIDENCE_CHARS and
+                           not GENERIC_PRAISE.search(fragment.text.casefold()))
         if not candidates:
             return None
         lexical = {fragment.fragment_index: _lexical_score(fragment, order, profile["anon_name"])

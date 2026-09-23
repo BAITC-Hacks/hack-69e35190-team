@@ -66,8 +66,12 @@ def validate_order(data, cities=CITIES, event_types=EVENT_TYPES, languages=LANGU
         result["language"] = _canonical(language, languages, "language")
     duration = data.get("duration_hours")
     if duration is not None:
-        if (isinstance(duration, bool) or not isinstance(duration, (int, float)) or
-                not math.isfinite(duration) or duration <= 0):
+        try:
+            valid_duration = (not isinstance(duration, bool) and isinstance(duration, (int, float))
+                              and duration > 0 and math.isfinite(duration))
+        except OverflowError:
+            valid_duration = False
+        if not valid_duration:
             raise ValueError("duration_hours: требуется положительное конечное число")
         result["duration_hours"] = duration
     return result

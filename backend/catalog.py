@@ -2,7 +2,7 @@
 
 import csv
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import FrozenSet, Optional, Tuple
@@ -45,6 +45,33 @@ def _list(value):
     if not items:
         raise ValueError("пустой список")
     return items
+
+
+def _canonical_labels(profiles):
+    """Единые названия внутри каталога; выбор не зависит от порядка строк CSV.
+
+    Исходный CSV и описания не меняются. Нормализуются только метки,
+    участвующие в строгих фильтрах, а не имена подрядчиков или их id.
+    """
+    seeds = {"city": CITIES, "categories": (), "event_formats": EVENT_TYPES,
+             "languages": LANGUAGES}
+    labels = {}
+    for field, preferred in seeds.items():
+        choices = {value.casefold(): value for value in preferred}
+        values = {value for profile in profiles
+                  for value in ((profile.city,) if field == "city" else getattr(profile, field))}
+        for value in sorted(values):
+            choices.setdefault(value.casefold(), value)
+        labels[field] = choices
+
+    normalized = []
+    for profile in profiles:
+        fields = {"city": labels["city"][profile.city.casefold()]}
+        for field in ("categories", "event_formats", "languages"):
+            fields[field] = tuple(dict.fromkeys(labels[field][value.casefold()]
+                                               for value in getattr(profile, field)))
+        normalized.append(replace(profile, **fields))
+    return tuple(normalized)
 
 
 def load_catalog(path=DEFAULT_CSV, calendar_start=CALENDAR_START, calendar_end=CALENDAR_END):
@@ -102,4 +129,4 @@ def load_catalog(path=DEFAULT_CSV, calendar_start=CALENDAR_START, calendar_end=C
                 raise ValueError("CSV, строка {}: {}".format(line_number, error)) from error
     if not profiles:
         raise ValueError("Каталог пуст")
-    return tuple(profiles)
+    return _canonical_labels(profiles)

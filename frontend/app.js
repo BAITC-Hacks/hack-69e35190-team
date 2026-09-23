@@ -4,7 +4,7 @@
   const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const money = value => Number(value).toLocaleString('ru-RU') + ' ₸';
   const date = value => value.split('-').reverse().join('.');
-  let slots = {}, serial = 0, busy = false, datasets = [], datasetId = 'default', lastRecommendation = null;
+  let slots = {}, pendingFields = [], serial = 0, busy = false, datasets = [], datasetId = 'default', lastRecommendation = null;
 
   async function api(path, body) {
     const controller = new AbortController();
@@ -78,7 +78,7 @@
   }
 
   function reset() {
-    serial++; slots = {}; lastRecommendation = null; setBusy(false);
+    serial++; slots = {}; pendingFields = []; lastRecommendation = null; setBusy(false);
     el('chat').replaceChildren(); chips([]);
     const selected = datasets.find(d => d.id === datasetId);
     add('bot', 'Опишите мероприятие: город, дата, тип, категория и бюджет; необязательно — язык и часы. Например: «фотосессия на корпоратив в Алмате 25 октября на 3 часа, бюджет 50тыс».');
@@ -110,9 +110,10 @@
     const current = ++serial; setBusy(true); chips([]);
     const started = performance.now();
     try {
-      const response = await api('/chat', {message:text, slots, dataset_id:datasetId});
+      const response = await api('/chat', {message:text, slots, pending_fields:pendingFields, dataset_id:datasetId});
       if (current !== serial) return;
       slots = response.slots;
+      pendingFields = response.pending_fields || [];
       let html = `<div class="slots-note">Распознано: ${escapeHtml(summary()) || 'пока нет параметров'}</div>`;
       for (const warning of response.warnings) html += `<p>${escapeHtml(warning)}</p>`;
       if (response.result) { html += resultHTML(response.result); remember(response.result); }
@@ -139,7 +140,7 @@
       const message = same
         ? (result.cards.length ? `Порядок совпал: все ${result.cards.length} карточки на тех же местах.` : 'Пустой результат повторился с теми же параметрами.')
         : 'Результат изменился: порядок карточек или исход отличаются от предыдущего запроса.';
-      slots = {...previous.order}; remember(result);
+      slots = {...previous.order}; pendingFields = []; remember(result);
       add('bot', `<div class="outcome-banner ${same ? 'matched' : 'warn'}">${escapeHtml(message)} Сравнение выполнено по кодам профилей; параметры и каталог те же.</div>${resultHTML(result)}${timingHTML(started)}`);
     } catch (error) {
       if (current === serial) add('bot', `<div class="outcome-banner bad">${escapeHtml(error.message)}</div>${timingHTML(started)}`);
@@ -206,7 +207,7 @@
     let expected = serial;
     for (const key of ['dense', 'rare', 'empty']) {
       if (expected !== serial) return;
-      slots = {};
+      slots = {}; pendingFields = [];
       const response = await send(demos[key]);
       if (!response || !response.hasResult || response.serial !== serial) return;
       expected = response.serial;

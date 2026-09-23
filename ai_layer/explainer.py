@@ -61,6 +61,14 @@ def _format_explanation(order, row, fragment, event_date):
         evidence = " ".join(fragment.text.split()).strip(" .!?,;:")
         if evidence:
             result += " В описании: «{}».".format(evidence)
+    else:
+        # В некоторых профилях исходное описание состоит только из рекламы.
+        # Используем проверяемые поля и честно обозначаем отсутствие цитаты.
+        service_limit = ("максимум присутствия — {} ч".format(row["max_hours"])
+                         if row["max_hours"] else "услуга не привязана к часам присутствия")
+        result += (" Краткой конкретной цитаты в описании нет; по каталогу языки — {}; {}."
+                   .format(", ".join(value.strip() for value in row["languages"].split("|")),
+                           service_limit))
     return result
 
 

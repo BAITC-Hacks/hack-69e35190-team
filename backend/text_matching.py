@@ -70,6 +70,12 @@ def catalog_value(text, field, choices, aliases):
     for value in sorted(choices, key=lambda value: (-len(value), value)):
         if _contains(text, value):
             return value
+        # Новые CSV могут содержать языки, которых нет в заранее заданных алиасах.
+        # «На испанском» — та же категория языка, что каноническое «испанский».
+        if field == "language" and normalize(value).endswith("ий"):
+            stem = normalize(value)[:-2]
+            if any(_contains(text, stem + ending) for ending in ("ом", "ого", "ому", "и")):
+                return value
     for value, stems in aliases.items():
         if value in choices and any(re.search(r"(?<!\w)" + re.escape(normalize(stem)), text)
                                     for stem in stems):
