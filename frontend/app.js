@@ -4,7 +4,7 @@
   const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const money = value => Number(value).toLocaleString('ru-RU') + ' ₸';
   const date = value => value.split('-').reverse().join('.');
-  let slots = {}, serial = 0, busy = false, datasets = [], datasetId = 'default';
+  let slots = {}, serial = 0, busy = false, datasets = [], datasetId = 'default', lastRecommendation = null;
 
   async function api(path, body) {
     const controller = new AbortController();
@@ -32,21 +32,39 @@
     row.appendChild(bubble); el('chat').appendChild(row); el('chat').scrollTop = el('chat').scrollHeight;
   }
 
-  function summary() {
-    return [slots.category, slots.city, slots.event_type, slots.event_date && date(slots.event_date),
-      slots.budget_kzt && money(slots.budget_kzt), slots.duration_hours && `${slots.duration_hours} ч`, slots.language].filter(Boolean).join(' · ');
+  function summary(order = slots) {
+    return [order.category, order.city, order.event_type, order.event_date && date(order.event_date),
+      order.budget_kzt && money(order.budget_kzt), order.duration_hours && `${order.duration_hours} ч`, order.language].filter(Boolean).join(' · ');
+  }
+
+  function timingHTML(started) {
+    const elapsed = (performance.now() - started) / 1000;
+    return `<div class="response-time${elapsed > 10 ? ' slow' : ''}">Ответ за ${elapsed.toLocaleString('ru-RU', {minimumFractionDigits:2, maximumFractionDigits:2})} с · ${elapsed > 10 ? 'дольше ориентира 10 с' : 'ориентир ≤ 10 с'}</div>`;
+  }
+
+  function comparisonHTML(comparison) {
+    if (!comparison) return '';
+    let html = `<section class="comparison"><h3>Изменилась только дата: ${escapeHtml(date(comparison.previous_date))} → ${escapeHtml(date(comparison.event_date))}</h3><p>${escapeHtml(comparison.message)}</p>`;
+    if (comparison.changes.length) {
+      html += '<ul>' + comparison.changes.map(change => `<li><strong>${escapeHtml(change.anon_name)}</strong>: ${escapeHtml(change.message)}</li>`).join('') + '</ul>';
+    }
+    return html + '</section>';
   }
 
   function resultHTML(result) {
     const titles = {matched:'Подобрали подрядчиков.',category_not_in_city:'Нет такой категории в городе.',no_matches:'Кандидаты есть, но ни один не подходит.'};
     const style = {matched:'matched',category_not_in_city:'warn',no_matches:'bad'}[result.status];
     let html = `<div class="outcome-banner ${style}"><b>${titles[result.status]}</b><br>${escapeHtml(result.message)}</div>`;
+    html += comparisonHTML(result.date_comparison);
+    if (result.cards.length) {
+      html += `<p class="breakdown">Кандидатов в городе: ${result.candidate_count} · прошли условия: ${result.eligible_count} · показаны первые ${result.cards.length}.<br>Порядок: цена «от» по возрастанию; при равной цене — код профиля.</p>`;
+    }
     for (const [i,p] of result.cards.entries()) {
       const tags = [p.synthetic ? 'синтетический профиль' : 'несинтетический профиль (по CSV)'];
       if (datasetId !== 'default') tags.push('из загруженного CSV');
       if (p.city_imputed) tags.push('город проставлен при подготовке');
       if (p.price_imputed) tags.push('цену «от» нужно уточнить');
-      html += `<div class="card"><div class="card-top"><div><span class="card-rank">#${i+1}</span><span class="card-name">${escapeHtml(p.anon_name)}</span></div><div class="card-price">от ${money(p.price_from_kzt)}</div></div><div class="card-cat">${escapeHtml(p.category)} — ${escapeHtml(p.city)}</div><div class="card-tags">${tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('')}</div><div class="card-explain">${escapeHtml(p.explanation)}</div></div>`;
+      html += `<div class="card"><div class="card-top"><div><span class="card-rank">#${i+1}</span><span class="card-name">${escapeHtml(p.anon_name)}</span><span class="card-code">${escapeHtml(p.id)}</span></div><div class="card-price">от ${money(p.price_from_kzt)}</div></div><div class="card-cat">${escapeHtml(p.category)} — ${escapeHtml(p.city)}</div><div class="card-tags">${tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('')}</div><div class="card-explain">${escapeHtml(p.explanation)}</div></div>`;
     }
     return html;
   }
@@ -60,7 +78,7 @@
   }
 
   function reset() {
-    serial++; slots = {}; busy = false; el('sendBtn').disabled = false; el('sendBtn').textContent = 'Отправить';
+    serial++; slots = {}; lastRecommendation = null; setBusy(false);
     el('chat').replaceChildren(); chips([]);
     const selected = datasets.find(d => d.id === datasetId);
     add('bot', 'Опишите мероприятие: город, дата, тип, категория и бюджет; необязательно — язык и часы. Например: «фотосессия на корпоратив в Алмате 25 октября на 3 часа, бюджет 50тыс».');
@@ -70,24 +88,63 @@
     }
   }
 
+  function setBusy(value) {
+    busy = value;
+    el('sendBtn').disabled = value; el('sendBtn').textContent = value ? 'Подбираю…' : 'Отправить';
+    el('repeatBtn').disabled = value || !lastRecommendation;
+    el('datasetSelect').disabled = value;
+    document.querySelectorAll('[data-preset], #compareDatesBtn, #showExamplesBtn').forEach(button => { button.disabled = value; });
+  }
+
+  function remember(result, order = slots) {
+    lastRecommendation = {
+      order:Object.fromEntries(Object.entries(order).filter(([, value]) => value != null)),
+      datasetId, ids:result.cards.map(card => card.id), status:result.status
+    };
+  }
+
   async function send(text) {
     if (!text.trim() || busy) return;
     if (/^(сброс|заново|новый поиск|начать заново)$/i.test(text.trim())) { reset(); return; }
     add('user', escapeHtml(text));
-    const current = ++serial; busy = true; el('sendBtn').disabled = true; el('sendBtn').textContent = 'Подбираю…'; chips([]);
+    const current = ++serial; setBusy(true); chips([]);
+    const started = performance.now();
     try {
       const response = await api('/chat', {message:text, slots, dataset_id:datasetId});
       if (current !== serial) return;
       slots = response.slots;
       let html = `<div class="slots-note">Распознано: ${escapeHtml(summary()) || 'пока нет параметров'}</div>`;
       for (const warning of response.warnings) html += `<p>${escapeHtml(warning)}</p>`;
-      if (response.result) html += resultHTML(response.result);
+      if (response.result) { html += resultHTML(response.result); remember(response.result); }
       else { html += escapeHtml(response.prompt); chips(response.choices); }
-      add('bot', html);
+      add('bot', html + timingHTML(started));
+      return {serial:current, hasResult:!!response.result};
     } catch (error) {
-      if (current === serial) add('bot', `<div class="outcome-banner bad">${escapeHtml(error.message)}</div>`);
+      if (current === serial) add('bot', `<div class="outcome-banner bad">${escapeHtml(error.message)}</div>${timingHTML(started)}`);
     } finally {
-      if (current === serial) { busy = false; el('sendBtn').disabled = false; el('sendBtn').textContent = 'Отправить'; }
+      if (current === serial) setBusy(false);
+    }
+  }
+
+  async function repeat() {
+    if (busy || !lastRecommendation || lastRecommendation.datasetId !== datasetId) return;
+    const previous = lastRecommendation;
+    add('user', `Повторить с теми же параметрами: ${escapeHtml(summary(previous.order))}`);
+    const current = ++serial; setBusy(true); chips([]);
+    const started = performance.now();
+    try {
+      const result = await api('/recommendations', {...previous.order, dataset_id:previous.datasetId});
+      if (current !== serial) return;
+      const same = previous.status === result.status && JSON.stringify(previous.ids) === JSON.stringify(result.cards.map(card => card.id));
+      const message = same
+        ? (result.cards.length ? `Порядок совпал: все ${result.cards.length} карточки на тех же местах.` : 'Пустой результат повторился с теми же параметрами.')
+        : 'Результат изменился: порядок карточек или исход отличаются от предыдущего запроса.';
+      slots = {...previous.order}; remember(result);
+      add('bot', `<div class="outcome-banner ${same ? 'matched' : 'warn'}">${escapeHtml(message)} Сравнение выполнено по кодам профилей; параметры и каталог те же.</div>${resultHTML(result)}${timingHTML(started)}`);
+    } catch (error) {
+      if (current === serial) add('bot', `<div class="outcome-banner bad">${escapeHtml(error.message)}</div>${timingHTML(started)}`);
+    } finally {
+      if (current === serial) setBusy(false);
     }
   }
 
@@ -97,6 +154,10 @@
     const status = {ready:'семантический индекс готов',lexical:'локальный поиск',indexing:'индекс строится',degraded:'API недоступен — локальный поиск'}[d.index_status];
     el('datasetInfo').textContent = `${d.profile_count} профилей, из них синтетических ${d.synthetic_count}. ${status}. ${d.index_message}`;
     el('presets').hidden = datasetId !== 'default';
+    const counts = d.category_counts;
+    if (counts) {
+      el('demoDescription').textContent = `В исходном каталоге: ведущих — ${counts['Ведущий'] || 0}, фотографов — ${counts['Фотограф'] || 0}, банкетных залов — ${counts['Банкетный зал'] || 0}; флористов — ${counts['Флорист'] || 0}. Примеры показывают ранжирование осенью, редкую категорию и запрос без результата.`;
+    }
   }
 
   async function refresh(selectedId) {
@@ -113,6 +174,7 @@
   el('sendBtn').addEventListener('click', () => { if (busy) return; const value = el('msgInput').value; el('msgInput').value = ''; send(value); });
   el('msgInput').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); el('sendBtn').click(); } });
   el('resetBtn').addEventListener('click', reset);
+  el('repeatBtn').addEventListener('click', repeat);
   el('datasetSelect').addEventListener('change', () => { datasetId = el('datasetSelect').value; showDataset(); reset(); });
   el('refreshDatasets').addEventListener('click', () => refresh().catch(error => { el('datasetInfo').textContent = error.message; }));
   el('indexDataset').addEventListener('click', async () => {
@@ -132,11 +194,30 @@
   });
   const demos = {
     dense:'Корпоратив в Алматы 10 октября, ведущий, бюджет 1500000',
-    date:'Корпоратив в Алматы 11 октября, ведущий, бюджет 1500000',
     rare:'Свадьба в Алматы 10 октября, флорист, бюджет 500000',
     absent:'Свадьба в Зарубежье 10 октября, флорист, бюджет 500000',
     empty:'Фотосессия на корпоратив, в Алмате на 25 октября, в 15:00 на 3 часа, бюджет 50тыс, язык не важен'
   };
-  document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => { reset(); send(demos[button.dataset.preset]); }));
+  document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => { if (busy) return; reset(); send(demos[button.dataset.preset]); }));
+  el('showExamplesBtn').addEventListener('click', async () => {
+    if (busy) return;
+    reset();
+    add('bot', 'Покажем три отдельных запроса: ведущие на осеннюю дату, флорист и подбор с бюджетом 50 тысяч. Все результаты останутся в диалоге.');
+    let expected = serial;
+    for (const key of ['dense', 'rare', 'empty']) {
+      if (expected !== serial) return;
+      slots = {};
+      const response = await send(demos[key]);
+      if (!response || !response.hasResult || response.serial !== serial) return;
+      expected = response.serial;
+    }
+  });
+  el('compareDatesBtn').addEventListener('click', async () => {
+    if (busy) return;
+    reset();
+    add('bot', 'Сначала подберём ведущих на 10 октября, затем изменим только дату на 11 октября. Оба результата останутся в диалоге, а изменения занятости будут объяснены.');
+    const first = await send(demos.dense);
+    if (first && first.hasResult && first.serial === serial) await send('11 октября');
+  });
   refresh().then(reset).catch(error => add('bot', escapeHtml(error.message)));
 })();

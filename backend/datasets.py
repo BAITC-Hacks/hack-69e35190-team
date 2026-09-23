@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -62,6 +63,8 @@ class DatasetRegistry:
                 "csv_sha256": service.explainer.catalog.digest,
                 "calendar_start": str(service.calendar_start), "calendar_end": str(service.calendar_end),
                 "cities": list(service.cities), "categories": sorted(service.categories.values()),
+                "category_counts": dict(Counter(category for profile in service.profiles
+                                                 for category in set(profile.categories))),
                 "event_types": list(service.event_types), "languages": list(service.languages),
             }
 

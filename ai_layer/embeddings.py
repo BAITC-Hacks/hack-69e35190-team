@@ -5,6 +5,8 @@ import math
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .http_json import load_json
+
 
 class EmbeddingError(RuntimeError):
     pass
@@ -30,8 +32,7 @@ class OpenAIEmbeddings:
             "Content-Type": "application/json", "Authorization": "Bearer " + self.api_key,
         })
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                data = json.load(response)
+            data = load_json(request, timeout=self.timeout, opener=urlopen)
             indexed = {item["index"]: item["embedding"] for item in data["data"]}
             vectors = [indexed[i] for i in range(len(texts))]
             if any(len(vector) != self.dimensions or

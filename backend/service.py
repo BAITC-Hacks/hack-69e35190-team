@@ -121,16 +121,16 @@ class RecommendationService:
         self.explainer = explainer if explainer is not None else AIExplainer(catalog_csv=catalog_csv)
 
     def validate(self, data):
-        return validate_order(data, self.cities, self.event_types, self.languages,
-                              self.calendar_start, self.calendar_end)
+        order = validate_order(data, self.cities, self.event_types, self.languages,
+                               self.calendar_start, self.calendar_end)
+        order["category"] = self.categories.get(order["category"].casefold(), order["category"])
+        return order
 
-    def recommend(self, data):
-        order = self.validate(data)
-        category = self.categories.get(order["category"].casefold(), order["category"])
-        order["category"] = category
+    def _select(self, order):
+        """Фильтры и порядок без объяснений и обращений к AI."""
         event_date = date.fromisoformat(order["event_date"])
         candidates = [profile for profile in self.profiles
-                      if profile.city == order["city"] and category in profile.categories]
+                      if profile.city == order["city"] and order["category"] in profile.categories]
         counts = Counter({key: 0 for key in REASON_NAMES})
         eligible = []
         for profile in candidates:
@@ -139,6 +139,51 @@ class RecommendationService:
             if not reasons:
                 eligible.append(profile)
         eligible.sort(key=lambda profile: (profile.price_from_kzt, profile.id))
+        return candidates, eligible, counts
+
+    def compare_dates(self, previous, current):
+        """Объясняет изменение первых трёх по CSV, если изменена только дата."""
+        previous, current = self.validate(previous), self.validate(current)
+        before_date, after_date = previous["event_date"], current["event_date"]
+        before_filters = {key: value for key, value in previous.items() if key != "event_date"}
+        after_filters = {key: value for key, value in current.items() if key != "event_date"}
+        if before_date == after_date or before_filters != after_filters:
+            return None
+        _, before, _ = self._select(previous)
+        _, after, _ = self._select(current)
+        before, after = before[:3], after[:3]
+        before_ids, after_ids = {p.id for p in before}, {p.id for p in after}
+        changes = []
+        for change, profiles, other_ids in (("removed", before, after_ids), ("added", after, before_ids)):
+            for profile in profiles:
+                if profile.id in other_ids:
+                    continue
+                if change == "removed" and date.fromisoformat(after_date) in profile.busy_dates:
+                    reason = "busy"
+                    message = "Исключён: занят {}; на {} не был отмечен занятым.".format(after_date, before_date)
+                elif change == "added" and date.fromisoformat(before_date) in profile.busy_dates:
+                    reason = "available"
+                    message = "Добавлен: на {} был занят; на {} не отмечен занятым.".format(before_date, after_date)
+                else:
+                    reason = "rank"
+                    movement = "больше не входит в" if change == "removed" else "входит в"
+                    message = ("На обе даты не отмечен занятым; {} первые три после изменения "
+                               "состава доступных профилей и сортировки по цене «от» и id.").format(movement)
+                changes.append({"id": profile.id, "anon_name": profile.anon_name,
+                                "change": change, "reason": reason, "message": message})
+        if changes:
+            message = "Состав изменился из-за занятости на разные даты. Остальные условия и правило сортировки сохранены."
+        elif before:
+            message = "На эти две даты первые карточки совпадают; остальные условия сохранены."
+        else:
+            message = "На обе даты подходящих профилей нет; остальные условия сохранены."
+        return {"previous_date": before_date, "event_date": after_date,
+                "message": message, "changes": changes}
+
+    def recommend(self, data):
+        order = self.validate(data)
+        category = order["category"]
+        candidates, eligible, counts = self._select(order)
         if not candidates:
             status = "category_not_in_city"
             message = "В городе {} категории «{}» в каталоге нет.".format(order["city"], category)

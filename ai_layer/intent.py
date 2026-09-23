@@ -3,6 +3,8 @@
 import json
 from urllib.request import Request, urlopen
 
+from .http_json import load_json
+
 FIELDS = ("city", "category", "event_type", "event_date", "budget_kzt", "language", "duration_hours")
 SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["updates"],
@@ -17,8 +19,11 @@ SCHEMA = {
 
 
 class IntentExtractor:
-    def __init__(self, settings):
+    endpoint = "https://api.openai.com/v1/chat/completions"
+
+    def __init__(self, settings, timeout=3):
         self.settings = settings
+        self.timeout = timeout
 
     def extract(self, text, previous, vocabulary):
         instructions = (
@@ -39,12 +44,11 @@ class IntentExtractor:
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "order_updates", "strict": True, "schema": SCHEMA}},
         }
-        request = Request("https://api.openai.com/v1/chat/completions",
+        request = Request(self.endpoint,
                           data=json.dumps(payload).encode("utf-8"), headers={
                               "Content-Type": "application/json",
                               "Authorization": "Bearer " + self.settings.openai_api_key})
-        with urlopen(request, timeout=3) as response:
-            result = json.load(response)
+        result = load_json(request, timeout=self.timeout, opener=urlopen)
         message = result["choices"][0]["message"]
         if message.get("refusal"):
             raise ValueError("Отказ парсера")

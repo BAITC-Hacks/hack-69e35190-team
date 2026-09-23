@@ -58,13 +58,70 @@ class AILayerTests(unittest.TestCase):
                     self.assertIn(" ".join(evidence.text.split()).strip(" .!?,;:"), card["explanation"])
 
     def test_dense_explanations_are_not_interchangeable(self):
-        case = self.cases[0]
-        result = self.explainer.enrich_response(case["request"], self._response(case))
-        explanations = [card["explanation"] for card in result["cards"]]
-        self.assertEqual(len(set(explanations)), 3)
-        self.assertTrue(any("корпоратив" in text.lower() and "делов" in text.lower() for text in explanations))
-        self.assertTrue(any("танц" in text.lower() for text in explanations))
-        self.assertTrue(any("традиц" in text.lower() or "двуязыч" in text.lower() for text in explanations))
+        # Проверяем смысловую деталь отдельно от даты, цены и прочих общих фактов:
+        # разные числа или имена сами по себе не выполняют критерий приёмки.
+        details = {
+            "HK-88430": ("корпоративных мероприятий", "деловых встреч"),
+            "HK-29829": ("развлечения", "танцы"),
+            "HK-27222": ("европейская подача", "тонкий юмор", "уважение к традициям"),
+            "HK-44923": ("оригинальный сценарий",),
+            "HK-44733": ("от 8 человек", "на 3000 человек"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeEmbeddings()
+            semantic = AIExplainer(settings=Settings(model="fake", dimensions=2), embedder=fake,
+                                   index_path=Path(directory) / "index.json")
+            semantic.prepare_index()
+            for mode in ("local", "semantic", "offline"):
+                explainer = self.explainer if mode == "local" else semantic
+                fake.fail = mode == "offline"
+                explainer.selector.query_cache.clear()
+                for case in self.cases[:2]:
+                    with self.subTest(mode=mode, case=case["id"]):
+                        original = self._response(case)
+                        result = explainer.enrich_response(case["request"], original)
+                        cards = result["cards"]
+                        self.assertEqual([card["id"] for card in cards], case["expected"]["card_ids"])
+                        self.assertEqual(len(cards), 3)
+                        repeated = explainer.enrich_response(case["request"], original)
+                        self.assertEqual(result, repeated)
+
+                        names = [explainer.catalog.profiles[card["id"]]["anon_name"] for card in cards]
+
+                        def blinded(text):
+                            text = " ".join(text.casefold().split())
+                            for name in names:
+                                text = text.replace(name.casefold(), "")
+                            return " ".join(text.split())
+
+                        sources = {card["id"]: blinded(explainer.catalog.profiles[card["id"]]["description"])
+                                   for card in cards}
+                        quotes = []
+                        for card in cards:
+                            text = card["explanation"]
+                            self.assertIn(" В описании: «", text)
+                            self.assertTrue(text.endswith("»."))
+                            quote = blinded(text.split(" В описании: «", 1)[1][:-2])
+                            self.assertTrue(quote)
+                            for detail in details[card["id"]]:
+                                self.assertIn(detail, quote)
+                            # После удаления имён цитата должна подходить ровно
+                            # одному исходному описанию из показанной тройки.
+                            owners = [profile_id for profile_id, source in sources.items() if quote in source]
+                            self.assertEqual(owners, [card["id"]])
+                            quotes.append(quote)
+                        self.assertEqual(len(set(quotes)), 3)
+
+    def test_photographer_explanation_uses_experience_instead_of_farewell(self):
+        order = dict(self.cases[0]["request"], category="Фотограф")
+        row = self.explainer.catalog.profiles["HK-30583"]
+        card = {"id": row["id"], "price_from_kzt": int(row["price_from_kzt"])}
+        explanation = self.explainer.explain_card(order, card)
+        self.assertIn("снимаю и концерты", explanation)
+        self.assertNotIn("До встречи", explanation)
+        fragment = self.explainer.selector.select(order, card["id"])
+        self.assertEqual(row["description"][fragment.start:fragment.end], fragment.text)
+        self.assertIn(" ".join(fragment.text.split()).strip(" .!?,;:"), explanation)
 
     def test_rejects_ineligible_card(self):
         case = self.cases[0]
